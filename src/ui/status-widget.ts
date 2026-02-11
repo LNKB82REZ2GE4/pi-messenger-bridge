@@ -19,6 +19,7 @@ export function createStatusWidget(
   }
 
   const transportList = transports
+    .filter((t) => t.connected)
     .map((t) => {
       const abbrev = TRANSPORT_ABBREV[t.type] || t.type.slice(0, 3);
       const userCount = usersByTransport[t.type]?.length || 0;

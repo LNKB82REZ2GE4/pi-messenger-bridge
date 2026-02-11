@@ -2,6 +2,9 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { TransportManager } from "./transports/manager.js";
 import { TelegramProvider } from "./transports/telegram.js";
+import { WhatsAppProvider } from "./transports/whatsapp.js";
+import { SlackProvider } from "./transports/slack.js";
+import { DiscordProvider } from "./transports/discord.js";
 import { ChallengeAuth } from "./auth/challenge-auth.js";
 import { createStatusWidget } from "./ui/status-widget.js";
 import type { PendingRemoteChat, MsgBridgeConfig, TransportStatus } from "./types.js";
@@ -29,8 +32,7 @@ export default function (pi: ExtensionAPI): void {
     const configPath = path.join(
       os.homedir(),
       ".pi",
-      "msg-bridge",
-      "config.json"
+      "msg-bridge.json"
     );
     if (fs.existsSync(configPath)) {
       try {
@@ -52,8 +54,8 @@ export default function (pi: ExtensionAPI): void {
     if (process.env.PI_TELEGRAM_TOKEN) {
       config.telegram = { token: process.env.PI_TELEGRAM_TOKEN };
     }
-    if (process.env.PI_WHATSAPP_TOKEN) {
-      config.whatsapp = { token: process.env.PI_WHATSAPP_TOKEN };
+    if (process.env.PI_WHATSAPP_AUTH_PATH) {
+      config.whatsapp = { authPath: process.env.PI_WHATSAPP_AUTH_PATH };
     }
     if (process.env.PI_SLACK_BOT_TOKEN && process.env.PI_SLACK_APP_TOKEN) {
       config.slack = {
@@ -72,13 +74,19 @@ export default function (pi: ExtensionAPI): void {
    * Save config to file
    */
   function saveConfig(config: MsgBridgeConfig): void {
-    const configDir = path.join(os.homedir(), ".pi", "msg-bridge");
+    const configDir = path.join(os.homedir(), ".pi");
     if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
+      fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     }
-    const configPath = path.join(configDir, "config.json");
+    const configPath = path.join(configDir, "msg-bridge.json");
     // Write with secure permissions (owner read/write only)
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+    // Ensure directory permissions are also secure
+    try {
+      fs.chmodSync(configDir, 0o700);
+    } catch (err) {
+      console.warn("Failed to set directory permissions:", err);
+    }
   }
 
   /**
@@ -232,21 +240,81 @@ export default function (pi: ExtensionAPI): void {
       auth.loadFromConfig(config.auth);
     }
 
-    if (config.telegram?.token) {
-      const telegramProvider = new TelegramProvider(config.telegram.token, auth);
-      transportManager.addTransport(telegramProvider);
-    }
+    // Initialize transports in the background (non-blocking)
+    (async () => {
+      const transportPromises: Promise<void>[] = [];
 
-    // Auto-connect if configured and autoConnect is not explicitly set to false
-    const transports = transportManager.getAllTransports();
-    if (transports.length > 0 && config.autoConnect !== false) {
-      try {
-        await transportManager.connectAll();
-        //ctx.ui.notify(`💬 Connected to ${transports.length} transport${transports.length === 1 ? "" : "s"}`, "info");
-      } catch (err) {
-        ctx.ui.notify(`⚠️ Some transports failed to connect: ${(err as Error).message}`, "warning");
+      if (config.telegram?.token) {
+        transportPromises.push(
+          Promise.resolve().then(() => {
+            const telegramProvider = new TelegramProvider(config.telegram!.token, auth);
+            transportManager.addTransport(telegramProvider);
+          })
+        );
       }
-    }
+
+      // Only auto-add WhatsApp if it has existing session (already authenticated)
+      if (config.whatsapp) {
+        const whatsappAuthPath = config.whatsapp.authPath || path.join(
+          os.homedir(),
+          ".pi",
+          "msg-bridge-whatsapp-auth"
+        );
+        
+        // Check if WhatsApp session exists (creds.json file present)
+        const credsPath = path.join(whatsappAuthPath, "creds.json");
+        if (fs.existsSync(credsPath)) {
+          transportPromises.push(
+            Promise.resolve().then(() => {
+              const whatsappConfig = { ...config.whatsapp!, debug: config.debug };
+              const whatsappProvider = new WhatsAppProvider(whatsappConfig, auth);
+              transportManager.addTransport(whatsappProvider);
+            })
+          );
+        } else {
+          // No valid credentials - remove from config
+          delete config.whatsapp;
+          saveConfig(config);
+        }
+      }
+
+      // Auto-add Slack if configured
+      if (config.slack?.botToken && config.slack?.appToken) {
+        transportPromises.push(
+          Promise.resolve().then(() => {
+            const slackProvider = new SlackProvider(config.slack!, auth);
+            transportManager.addTransport(slackProvider);
+          })
+        );
+      }
+
+      // Auto-add Discord if configured
+      if (config.discord?.token) {
+        transportPromises.push(
+          Promise.resolve().then(() => {
+            const discordProvider = new DiscordProvider(config.discord!, auth);
+            transportManager.addTransport(discordProvider);
+          })
+        );
+      }
+
+      // Wait for all transports to be initialized
+      await Promise.all(transportPromises);
+
+      // Auto-connect if configured and autoConnect is not explicitly set to false
+      const transports = transportManager.getAllTransports();
+      if (transports.length > 0 && config.autoConnect !== false) {
+        try {
+          await transportManager.connectAll();
+          updateWidget();
+        } catch (err) {
+          ctx.ui.notify(`⚠️ Some transports failed to connect: ${(err as Error).message}`, "warning");
+        }
+      }
+    })().catch(err => {
+      console.error("Transport initialization error:", err);
+      ctx.ui.notify(`❌ Transport initialization failed: ${err.message}`, "error");
+    });
 
     // Handle incoming messages from transports
     transportManager.onMessage((msg) => {
@@ -352,8 +420,10 @@ export default function (pi: ExtensionAPI): void {
           "/msg-bridge status            Show connection and user status",
           "/msg-bridge connect           Connect to all transports",
           "/msg-bridge disconnect        Disconnect from all transports",
-          "/msg-bridge configure <platform> <token>",
-          "                              Configure a transport",
+          "/msg-bridge configure telegram <token>",
+          "                              Configure Telegram bot",
+          "/msg-bridge configure whatsapp",
+          "                              Configure WhatsApp (scan QR)",
           "/msg-bridge widget            Toggle status widget on/off",
           "",
           "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -392,8 +462,8 @@ export default function (pi: ExtensionAPI): void {
         // Join remaining parts in case token has spaces or was split
         const token = parts.slice(2).join(" ");
 
-        if (!platform || !token) {
-          context.ui.notify("Usage: /msg-bridge configure <platform> <token>", "error");
+        if (!platform) {
+          context.ui.notify("Usage: /msg-bridge configure <platform> [token/path]", "error");
           return;
         }
 
@@ -401,6 +471,10 @@ export default function (pi: ExtensionAPI): void {
 
         switch (platform.toLowerCase()) {
           case "telegram":
+            if (!token) {
+              context.ui.notify("Usage: /msg-bridge configure telegram <bot-token>", "error");
+              return;
+            }
             config.telegram = { token };
             saveConfig(config);
             const telegramProvider = new TelegramProvider(token, auth);
@@ -410,6 +484,65 @@ export default function (pi: ExtensionAPI): void {
               context.ui.notify("✅ Telegram configured and connected", "info");
             } catch (err) {
               context.ui.notify(`✅ Telegram configured (run /msg-bridge connect to activate)`, "info");
+            }
+            updateWidget();
+            break;
+
+          case "whatsapp":
+            // Token is optional (defaults to ~/.pi/msg-bridge/whatsapp-auth)
+            config.whatsapp = token ? { authPath: token } : {};
+            saveConfig(config);
+            const whatsappConfig = { ...config.whatsapp, debug: config.debug };
+            const whatsappProvider = new WhatsAppProvider(whatsappConfig, auth);
+            transportManager.addTransport(whatsappProvider);
+            try {
+              await whatsappProvider.connect(true); // manual = true for configure command
+              context.ui.notify("✅ WhatsApp configured and connecting (scan QR code in terminal)...", "info");
+            } catch (err) {
+              context.ui.notify(`⚠️ WhatsApp setup error: ${(err as Error).message}`, "error");
+            }
+            updateWidget();
+            break;
+
+          case "slack":
+            // Slack requires both bot token and app token
+            const parts2 = token.split(/\s+/);
+            const botToken = parts2[0];
+            const appToken = parts2[1];
+            
+            if (!botToken || !appToken) {
+              context.ui.notify("Usage: /msg-bridge configure slack <bot-token> <app-token>", "error");
+              return;
+            }
+            
+            config.slack = { botToken, appToken };
+            saveConfig(config);
+            const slackProvider = new SlackProvider(config.slack, auth);
+            transportManager.addTransport(slackProvider);
+            try {
+              await slackProvider.connect();
+              context.ui.notify("✅ Slack configured and connected", "info");
+            } catch (err) {
+              context.ui.notify(`⚠️ Slack setup error: ${(err as Error).message}`, "error");
+            }
+            updateWidget();
+            break;
+
+          case "discord":
+            if (!token) {
+              context.ui.notify("Usage: /msg-bridge configure discord <bot-token>", "error");
+              return;
+            }
+            
+            config.discord = { token };
+            saveConfig(config);
+            const discordProvider = new DiscordProvider(config.discord, auth);
+            transportManager.addTransport(discordProvider);
+            try {
+              await discordProvider.connect();
+              context.ui.notify("✅ Discord configured and connected", "info");
+            } catch (err) {
+              context.ui.notify(`⚠️ Discord setup error: ${(err as Error).message}`, "error");
             }
             updateWidget();
             break;

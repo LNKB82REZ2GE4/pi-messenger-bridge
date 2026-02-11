@@ -45,14 +45,19 @@
     "CHANGELOG.md"
   ],
   "dependencies": {
+    "@mariozechner/pi-ai": "latest",
     "@mariozechner/pi-coding-agent": "latest",
     "@mariozechner/pi-tui": "latest",
-    "@mariozechner/pi-ai": "latest",
-    "node-telegram-bot-api": "^0.67.0"
+    "@slack/bolt": "^4.6.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "discord.js": "^14.25.1",
+    "node-telegram-bot-api": "^0.67.0",
+    "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
-    "typescript": "^5.0.0",
     "@types/node": "^20.0.0",
-    "@types/node-telegram-bot-api": "^0.64.13"
+    "@types/node-telegram-bot-api": "^0.64.13",
+    "@types/qrcode-terminal": "^0.12.2",
+    "typescript": "^5.0.0"
   }
 }

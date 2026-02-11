@@ -30,7 +30,7 @@ export interface MsgBridgeConfig {
     token: string;
   };
   whatsapp?: {
-    token: string;
+    authPath?: string;
   };
   slack?: {
     botToken: string;
@@ -46,6 +46,7 @@ export interface MsgBridgeConfig {
   };
   autoConnect?: boolean;
   showWidget?: boolean;
+  debug?: boolean;
 }
 
 /**
