@@ -18,13 +18,19 @@
     "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [
+    "pi-package",
     "pi",
     "pi-extension",
     "telegram",
-    "remote",
+    "whatsapp",
+    "slack",
+    "discord",
     "messenger",
     "bridge",
     "bot",
+    "remote",
+    "chat",
+    "messaging",
     "coding-agent"
   ],
   "author": "tintinweb",
