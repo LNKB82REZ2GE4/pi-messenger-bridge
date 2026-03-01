@@ -3,6 +3,8 @@
  * Ported from vscode-chonky-remote-pilot
  */
 
+import { randomInt } from "crypto";
+
 interface ChallengeData {
   code: string;
   userId: string;
@@ -16,6 +18,23 @@ interface ChannelAuth {
   enabled: boolean;
   mode: "all" | "mentions" | "trusted-only";
 }
+
+type ChannelAuthMode = ChannelAuth["mode"];
+
+const CHANNEL_AUTH_MODES: ReadonlySet<ChannelAuthMode> = new Set([
+  "all",
+  "mentions",
+  "trusted-only",
+]);
+
+const ADMIN_COMMANDS: ReadonlySet<string> = new Set([
+  "/help",
+  "/enable",
+  "/disable",
+  "/channels",
+  "/trusted",
+  "/revoke",
+]);
 
 /**
  * Manages authentication via 6-digit challenge codes and trusted users
@@ -47,6 +66,8 @@ export class ChallengeAuth {
     }
     if (config.adminUserId) {
       this.adminUserId = config.adminUserId;
+    } else if (this.trustedUsers.size > 0) {
+      this.adminUserId = Array.from(this.trustedUsers)[0];
     }
     if (config.channels) {
       this.channelAuth = new Map(Object.entries(config.channels));
@@ -83,7 +104,7 @@ export class ChallengeAuth {
   ): Promise<boolean> {
     // Create namespaced user ID (transport:userId)
     const namespacedUserId = transport ? `${transport}:${userId}` : userId;
-    
+
     // Check if user is blocked
     const blockedUntil = this.blockedUsers.get(namespacedUserId);
     if (blockedUntil && Date.now() < blockedUntil) {
@@ -100,6 +121,7 @@ export class ChallengeAuth {
         if (!this.adminUserId) {
           this.adminUserId = namespacedUserId;
           this.onNotify(`🔐 ${username} is now the admin`, "info");
+          if (this.onSaveAuth) this.onSaveAuth();
         }
         return true;
       }
@@ -112,7 +134,7 @@ export class ChallengeAuth {
         this.onSendMessage = originalSender;
         return result;
       }
-      
+
       return await this.initiateChallenge(namespacedUserId, chatId, username);
     }
 
@@ -174,7 +196,7 @@ export class ChallengeAuth {
 
     // Show code in terminal FIRST
     this.onShowCode(code, username);
-    
+
     // Then send message to user asking for the code
     if (this.onSendMessage) {
       try {
@@ -182,11 +204,11 @@ export class ChallengeAuth {
           chatId,
           "🔐 Please enter the 6-digit code provided by the bot admin.\n⏱️ Expires in 2 minutes."
         );
-      } catch (err) {
+      } catch {
         // Ignore send errors
       }
     }
-    
+
     return false;
   }
 
@@ -203,8 +225,8 @@ export class ChallengeAuth {
   ): Promise<boolean> {
     // Create namespaced user ID
     const namespacedUserId = transport ? `${transport}:${userId}` : userId;
-    
-    // Non-admin users: check for challenge code entry
+
+    // Non-trusted users: check for challenge code entry
     if (!this.trustedUsers.has(namespacedUserId)) {
       const challenge = this.challenges.get(namespacedUserId);
       if (challenge && text.match(/^\d{6}$/)) {
@@ -213,28 +235,49 @@ export class ChallengeAuth {
       return false;
     }
 
-    // Admin commands
     const parts = text.split(/\s+/);
     const cmd = parts[0].toLowerCase();
+
+    if (!ADMIN_COMMANDS.has(cmd)) {
+      return false;
+    }
+
+    if (!this.adminUserId) {
+      this.adminUserId = namespacedUserId;
+      if (this.onSaveAuth) this.onSaveAuth();
+    }
+
+    if (this.adminUserId !== namespacedUserId) {
+      await sendMessage("❌ Only the admin user can run this command.");
+      return true;
+    }
 
     switch (cmd) {
       case "/help":
         await sendMessage(this.getHelpText());
         return true;
 
-      case "/enable":
+      case "/enable": {
         if (parts.length < 3) {
           await sendMessage("Usage: /enable <chatId> <all|mentions|trusted-only>");
           return true;
         }
+
+        const mode = this.parseChannelAuthMode(parts[2]);
+        if (!mode) {
+          await sendMessage("Invalid mode. Use one of: all, mentions, trusted-only.");
+          return true;
+        }
+
         this.channelAuth.set(parts[1], {
           enabled: true,
-          mode: parts[2] as any,
+          mode,
         });
         if (this.onSaveAuth) this.onSaveAuth();
-        await sendMessage(`✅ Channel ${parts[1]} enabled (mode: ${parts[2]})`);
-        this.onNotify(`Channel ${parts[1]} enabled (${parts[2]})`, "info");
+        await sendMessage(`✅ Channel ${parts[1]} enabled (mode: ${mode})`);
+        this.onNotify(`Channel ${parts[1]} enabled (${mode})`, "info");
         return true;
+      }
 
       case "/disable":
         if (parts.length < 2) {
@@ -247,48 +290,61 @@ export class ChallengeAuth {
         this.onNotify(`Channel ${parts[1]} disabled`, "info");
         return true;
 
-      case "/channels":
+      case "/channels": {
         const channels = Array.from(this.channelAuth.entries())
           .map(([id, auth]) => `• ${id}: ${auth.enabled ? "✅" : "❌"} (${auth.mode})`)
           .join("\n");
         await sendMessage(channels || "No channels configured");
         return true;
+      }
 
-      case "/trusted":
+      case "/trusted": {
         const trusted = Array.from(this.trustedUsers)
-          .map(id => {
-            const [transport, uid] = id.split(':');
-            return uid ? `${uid} (${transport})` : id;
+          .map((id) => {
+            const [transportName, uid] = id.split(":");
+            return uid ? `${uid} (${transportName})` : id;
           })
           .join(", ");
         await sendMessage(`Trusted users (${this.trustedUsers.size}):\n${trusted || "None"}`);
         return true;
+      }
 
-      case "/revoke":
+      case "/revoke": {
         if (parts.length < 2) {
           await sendMessage("Usage: /revoke <userId> or /revoke <transport:userId>");
           return true;
         }
         const revokeId = parts[1];
+        let revokedNamespacedId: string | undefined;
+
         // Support both "telegram:123" and "123" (searches for any match)
-        let revoked = false;
-        if (revokeId.includes(':')) {
+        if (revokeId.includes(":")) {
           // Full namespaced ID
           if (this.trustedUsers.has(revokeId)) {
             this.trustedUsers.delete(revokeId);
-            revoked = true;
+            revokedNamespacedId = revokeId;
           }
         } else {
           // Plain ID - search across all transports
           for (const id of this.trustedUsers) {
             if (id.endsWith(`:${revokeId}`)) {
               this.trustedUsers.delete(id);
-              revoked = true;
+              revokedNamespacedId = id;
               break;
             }
           }
         }
-        if (revoked) {
+
+        if (revokedNamespacedId) {
+          if (revokedNamespacedId === this.adminUserId) {
+            this.adminUserId = Array.from(this.trustedUsers)[0];
+            if (this.adminUserId) {
+              this.onNotify(`🔐 Admin transferred to ${this.adminUserId}`, "warning");
+            } else {
+              this.onNotify("🔐 Admin revoked. Next trusted user will become admin.", "warning");
+            }
+          }
+
           if (this.onSaveAuth) this.onSaveAuth();
           await sendMessage(`🔓 Revoked trust for ${revokeId}`);
           this.onNotify(`Revoked: ${revokeId}`, "warning");
@@ -296,6 +352,7 @@ export class ChallengeAuth {
           await sendMessage(`❌ User ${revokeId} not found in trusted users`);
         }
         return true;
+      }
 
       default:
         return false;
@@ -350,7 +407,15 @@ export class ChallengeAuth {
    * Generate a random 6-digit code
    */
   private generateCode(): string {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return randomInt(0, 1_000_000).toString().padStart(6, "0");
+  }
+
+  /**
+   * Parse channel auth mode safely
+   */
+  private parseChannelAuthMode(mode: string): ChannelAuthMode | undefined {
+    const normalized = mode.trim().toLowerCase() as ChannelAuthMode;
+    return CHANNEL_AUTH_MODES.has(normalized) ? normalized : undefined;
   }
 
   /**
@@ -359,7 +424,7 @@ export class ChallengeAuth {
   private getHelpText(): string {
     return `**Admin Commands**
 
-*DM Only:*
+*DM Only (admin user):*
 • \`/help\` — Show this help
 • \`/trusted\` — List trusted users
 • \`/revoke <userId>\` — Revoke trust for a user
@@ -377,15 +442,15 @@ export class ChallengeAuth {
   /**
    * Get current stats with detailed user info
    */
-  getStats(): { 
-    trustedUsers: number; 
+  getStats(): {
+    trustedUsers: number;
     channels: number;
     usersByTransport: Record<string, string[]>;
   } {
     // Group users by transport
     const usersByTransport: Record<string, string[]> = {};
     for (const namespacedId of this.trustedUsers) {
-      const [transport, userId] = namespacedId.split(':');
+      const [transport, userId] = namespacedId.split(":");
       if (transport && userId) {
         if (!usersByTransport[transport]) {
           usersByTransport[transport] = [];
@@ -393,7 +458,7 @@ export class ChallengeAuth {
         usersByTransport[transport].push(userId);
       }
     }
-    
+
     return {
       trustedUsers: this.trustedUsers.size,
       channels: Array.from(this.channelAuth.values()).filter((a) => a.enabled).length,

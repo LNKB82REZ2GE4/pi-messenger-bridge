@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Restricted DM admin commands (`/enable`, `/disable`, `/channels`, `/trusted`, `/revoke`, `/help`) to `adminUserId` only; trusted non-admin users can no longer run admin operations.
+- Replaced challenge code generation from `Math.random()` to cryptographically secure `crypto.randomInt()`.
+- Added strict validation for `/enable <chatId> <mode>` to reject invalid channel auth modes.
+- Added deterministic admin backfill on config load and safe admin transfer behavior when revoking the current admin.
+
+### Changed
+- Replaced `latest` dependency specifiers for `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`, and `@mariozechner/pi-tui` with explicit semver ranges (`^0.55.3`) for more predictable installs.
+
 ## [0.2.1] - 2026-02-11
 
 ### Changed
