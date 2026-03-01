@@ -68,9 +68,9 @@ export class WhatsAppProvider implements ITransportProvider {
     const baileys = await loadBaileys();
     const { state, saveCreds } = await baileys.useMultiFileAuthState(this.authPath);
 
-    // Suppress Baileys logger unless debug mode
+    // Baileys expects a pino-like logger with child(); provide one in both modes.
     const silentLogger: any = {
-      level: 'silent' as const,
+      level: "silent" as const,
       child: () => silentLogger,
       trace: () => {},
       debug: () => {},
@@ -80,10 +80,21 @@ export class WhatsAppProvider implements ITransportProvider {
       fatal: () => {},
     };
 
+    const debugLogger: any = {
+      level: "debug" as const,
+      child: () => debugLogger,
+      trace: (...args: unknown[]) => console.debug("[WhatsApp][trace]", ...args),
+      debug: (...args: unknown[]) => console.debug("[WhatsApp][debug]", ...args),
+      info: (...args: unknown[]) => console.log("[WhatsApp][info]", ...args),
+      warn: (...args: unknown[]) => console.warn("[WhatsApp][warn]", ...args),
+      error: (...args: unknown[]) => console.error("[WhatsApp][error]", ...args),
+      fatal: (...args: unknown[]) => console.error("[WhatsApp][fatal]", ...args),
+    };
+
     this.socket = baileys.default({
       auth: state,
       printQRInTerminal: false, // We'll handle QR display ourselves
-      logger: this.debug ? undefined : silentLogger,
+      logger: this.debug ? debugLogger : silentLogger,
     });
 
     if (this.isManualConnect) {

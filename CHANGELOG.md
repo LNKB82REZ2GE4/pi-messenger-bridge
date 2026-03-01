@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Improved WhatsApp QR onboarding in TUI sessions by surfacing QR/status updates via `ctx.ui.notify` in addition to stdout logging.
 - Preserved manual-connect QR mode across reconnect attempts so `/msg-bridge configure whatsapp` continues to emit QR codes until authenticated.
+- Fixed WhatsApp debug-mode crash (`Cannot read properties of undefined (reading 'child')`) by always passing a pino-compatible logger object to Baileys.
 
 ## [0.2.1] - 2026-02-11
 
