@@ -28,7 +28,12 @@ export class WhatsAppProvider implements ITransportProvider {
   private isManualConnect = false;
 
   constructor(
-    private config: { authPath?: string; debug?: boolean },
+    private config: {
+      authPath?: string;
+      debug?: boolean;
+      onQr?: (qrAscii: string) => void;
+      onStatus?: (message: string, level?: "info" | "warning" | "error") => void;
+    },
     private auth: ChallengeAuth
   ) {
     // Default auth path to ~/.pi/msg-bridge-whatsapp-auth
@@ -81,6 +86,10 @@ export class WhatsAppProvider implements ITransportProvider {
       logger: this.debug ? undefined : silentLogger,
     });
 
+    if (this.isManualConnect) {
+      this.config.onStatus?.("📱 Waiting for WhatsApp QR code...", "info");
+    }
+
     // Handle connection updates - set up IMMEDIATELY after socket creation
     this.socket.ev.on("connection.update", async (update: any) => {
       const { connection, lastDisconnect, qr } = update;
@@ -90,8 +99,17 @@ export class WhatsAppProvider implements ITransportProvider {
       }
 
       if (qr && this.isManualConnect) {
+        let qrAscii = "";
+        qrcode.generate(qr, { small: true }, (renderedQr) => {
+          qrAscii = renderedQr;
+        });
+
+        if (qrAscii) {
+          this.config.onQr?.(qrAscii);
+        }
+
         console.log("\n📱 Scan this QR code with WhatsApp to authenticate:\n");
-        qrcode.generate(qr, { small: true });
+        console.log(qrAscii || "(QR generated but terminal rendering unavailable)");
         console.log("\n");
       }
 
@@ -111,11 +129,15 @@ export class WhatsAppProvider implements ITransportProvider {
             if (fs.existsSync(this.authPath)) {
               fs.rmSync(this.authPath, { recursive: true, force: true });
               if (this.isManualConnect) {
-                console.log("🔄 WhatsApp session expired. Cleared credentials. Reconnecting with QR code...");
+                const message = "🔄 WhatsApp session expired. Cleared credentials. Reconnecting with QR code...";
+                this.config.onStatus?.(message, "warning");
+                console.log(message);
                 // Reconnect after clearing auth to get fresh QR (manual configure only)
                 setTimeout(() => this.connect(true), 1000);
               } else {
-                console.log("🔄 WhatsApp session expired. Cleared credentials. Run /msg-bridge configure whatsapp to reconnect.");
+                const message = "🔄 WhatsApp session expired. Cleared credentials. Run /msg-bridge configure whatsapp to reconnect.";
+                this.config.onStatus?.(message, "warning");
+                console.log(message);
               }
             }
           } catch (err) {
@@ -123,12 +145,15 @@ export class WhatsAppProvider implements ITransportProvider {
           }
         } else if (shouldReconnect) {
           // Reconnect after 3 seconds
-          setTimeout(() => this.connect(), 3000);
+          setTimeout(() => this.connect(this.isManualConnect), 3000);
         } else if (this.debug) {
-          console.warn("⚠️ WhatsApp logged out. Run /msg-bridge configure whatsapp to reconnect.");
+          const message = "⚠️ WhatsApp logged out. Run /msg-bridge configure whatsapp to reconnect.";
+          this.config.onStatus?.(message, "warning");
+          console.warn(message);
         }
       } else if (connection === "open") {
         this._isConnected = true;
+        this.config.onStatus?.("✅ WhatsApp connected!", "info");
         console.log("✅ WhatsApp connected!");
       }
     });

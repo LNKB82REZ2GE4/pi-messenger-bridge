@@ -266,7 +266,13 @@ export default function (pi: ExtensionAPI): void {
         if (fs.existsSync(credsPath)) {
           transportPromises.push(
             Promise.resolve().then(() => {
-              const whatsappConfig = { ...config.whatsapp!, debug: config.debug };
+              const whatsappConfig = {
+                ...config.whatsapp!,
+                debug: config.debug,
+                onStatus: (message: string, level: "info" | "warning" | "error" = "info") => {
+                  ctx.ui.notify(message, level);
+                },
+              };
               const whatsappProvider = new WhatsAppProvider(whatsappConfig, auth);
               transportManager.addTransport(whatsappProvider);
             })
@@ -492,7 +498,16 @@ export default function (pi: ExtensionAPI): void {
             // Token is optional (defaults to ~/.pi/msg-bridge/whatsapp-auth)
             config.whatsapp = token ? { authPath: token } : {};
             saveConfig(config);
-            const whatsappConfig = { ...config.whatsapp, debug: config.debug };
+            const whatsappConfig = {
+              ...config.whatsapp,
+              debug: config.debug,
+              onQr: (qrAscii: string) => {
+                context.ui.notify(`📱 Scan this WhatsApp QR code:\n\n${qrAscii}`, "info");
+              },
+              onStatus: (message: string, level: "info" | "warning" | "error" = "info") => {
+                context.ui.notify(message, level);
+              },
+            };
             const whatsappProvider = new WhatsAppProvider(whatsappConfig, auth);
             transportManager.addTransport(whatsappProvider);
             try {

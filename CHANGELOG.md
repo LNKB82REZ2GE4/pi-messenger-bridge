@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Replaced `latest` dependency specifiers for `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`, and `@mariozechner/pi-tui` with explicit semver ranges (`^0.55.3`) for more predictable installs.
 
+### Fixed
+- Improved WhatsApp QR onboarding in TUI sessions by surfacing QR/status updates via `ctx.ui.notify` in addition to stdout logging.
+- Preserved manual-connect QR mode across reconnect attempts so `/msg-bridge configure whatsapp` continues to emit QR codes until authenticated.
+
 ## [0.2.1] - 2026-02-11
 
 ### Changed
