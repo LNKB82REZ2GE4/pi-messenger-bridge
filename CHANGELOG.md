@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserved manual-connect QR mode across reconnect attempts so `/msg-bridge configure whatsapp` continues to emit QR codes until authenticated.
 - Fixed WhatsApp debug-mode crash (`Cannot read properties of undefined (reading 'child')`) by always passing a pino-compatible logger object to Baileys.
 - Set WhatsApp browser signature dynamically from host OS (`Browsers.appropriate("Chrome")`) instead of Baileys' static macOS default.
+- Enabled Discord DM handling for uncached channels by configuring `discord.js` partials (`Partials.Channel`).
 
 ## [0.2.1] - 2026-02-11
 
