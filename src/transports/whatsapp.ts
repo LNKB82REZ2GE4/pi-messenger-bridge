@@ -91,14 +91,23 @@ export class WhatsAppProvider implements ITransportProvider {
       fatal: (...args: unknown[]) => console.error("[WhatsApp][fatal]", ...args),
     };
 
+    const browserSignature = baileys.Browsers?.appropriate?.("Chrome")
+      || baileys.Browsers?.ubuntu?.("Chrome")
+      || ["Ubuntu", "Chrome", "22.04.4"];
+
     this.socket = baileys.default({
       auth: state,
+      browser: browserSignature,
       printQRInTerminal: false, // We'll handle QR display ourselves
       logger: this.debug ? debugLogger : silentLogger,
     });
 
     if (this.isManualConnect) {
       this.config.onStatus?.("📱 Waiting for WhatsApp QR code...", "info");
+    }
+
+    if (this.debug) {
+      console.log("[WhatsApp] browser signature:", browserSignature);
     }
 
     // Handle connection updates - set up IMMEDIATELY after socket creation
