@@ -218,7 +218,7 @@ export class ChallengeAuth {
    */
   async handleAdminCommand(
     text: string,
-    chatId: string,
+    _chatId: string,
     userId: string,
     sendMessage: (text: string) => Promise<void>,
     transport?: string

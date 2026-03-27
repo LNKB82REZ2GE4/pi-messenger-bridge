@@ -1,6 +1,6 @@
-import type { ITransportProvider } from "./interface.js";
-import type { ExternalMessage } from "../types.js";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
+import type { ExternalMessage } from "../types.js";
+import type { ITransportProvider } from "./interface.js";
 
 // Dynamic import for ESM modules
 type Client = any;
@@ -53,7 +53,10 @@ export class DiscordProvider implements ITransportProvider {
         discord.GatewayIntentBits.MessageContent, // Privileged intent - must enable in Discord Developer Portal
       ],
       // Required so DM channels/messages can be handled when not cached
-      partials: [discord.Partials.Channel],
+      partials: [
+        discord.Partials.Channel,
+        discord.Partials.Message,
+      ],
     });
 
     // Handle incoming messages
@@ -173,8 +176,7 @@ export class DiscordProvider implements ITransportProvider {
     try {
       await this.client.login(token);
     } catch (error) {
-      console.error("[Discord] Failed to login:", error);
-      throw error;
+      throw new Error(`Discord login failed: ${(error as Error).message}`);
     }
   }
 
@@ -206,8 +208,7 @@ export class DiscordProvider implements ITransportProvider {
         }
       }
     } catch (error) {
-      console.error("[Discord] Failed to send message:", error);
-      throw error;
+      throw new Error(`Discord send failed: ${(error as Error).message}`);
     }
   }
 

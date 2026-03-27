@@ -7,21 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Daemon-safe Discord intake queue with request IDs, active-request lifecycle events, and programmatic enqueue/consume/send hooks.
+- Discord channel creation bridge event for orchestrated remote setup flows.
+- Per-profile config resolution via `PI_CODING_AGENT_DIR` for daemon/profile-specific msg-bridge state.
+
 ### Security
 - Restricted DM admin commands (`/enable`, `/disable`, `/channels`, `/trusted`, `/revoke`, `/help`) to `adminUserId` only; trusted non-admin users can no longer run admin operations.
 - Replaced challenge code generation from `Math.random()` to cryptographically secure `crypto.randomInt()`.
 - Added strict validation for `/enable <chatId> <mode>` to reject invalid channel auth modes.
 - Added deterministic admin backfill on config load and safe admin transfer behavior when revoking the current admin.
 
-### Changed
-- Replaced `latest` dependency specifiers for `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`, and `@mariozechner/pi-tui` with explicit semver ranges (`^0.55.3`) for more predictable installs.
-
 ### Fixed
 - Improved WhatsApp QR onboarding in TUI sessions by surfacing QR/status updates via `ctx.ui.notify` in addition to stdout logging.
 - Preserved manual-connect QR mode across reconnect attempts so `/msg-bridge configure whatsapp` continues to emit QR codes until authenticated.
 - Fixed WhatsApp debug-mode crash (`Cannot read properties of undefined (reading 'child')`) by always passing a pino-compatible logger object to Baileys.
 - Set WhatsApp browser signature dynamically from host OS (`Browsers.appropriate("Chrome")`) instead of Baileys' static macOS default.
-- Enabled Discord DM handling for uncached channels by configuring `discord.js` partials (`Partials.Channel`).
+- Hardened Discord DM intake with per-process singleton intake locking, duplicate/replayed message suppression, and uncached DM partial handling.
+
+## [0.3.0] - 2026-03-25
+
+### Added
+- Interactive menu (`/msg-bridge` with no args) — configure, connect, widget, help via `ui.select()`
+- Single-instance connection guard to prevent duplicate polling / 409 conflicts (fixes #2)
+  - Layer 1: global flag for same-process re-entrant calls (sub-agents)
+  - Layer 2: PID lock file (`~/.pi/msg-bridge.lock`) for cross-process duplicates
+- Session shutdown handler — releases lock and disconnects transports on exit
+- Lock check on `/msg-bridge configure` connect calls to prevent bypassing the guard
+- Test suite (vitest): config, lock, and formatting modules
+- CI workflow (GitHub Actions: lint + typecheck + test)
+- Biome linter configuration
+
+### Fixed
+- Discord DM messages not received — added required `Partials.Channel` and `Partials.Message` to client options (fixes #5, thanks @chr15m)
+- Transport errors now show clean messages instead of full stack traces
+
+### Changed
+- Extracted `config.ts`, `lock.ts`, `formatting.ts`, `ui/main-menu.ts` from index.ts
+- Moved `@mariozechner/pi-*` packages to peerDependencies
+- Updated devDependencies: typescript ^6.0.2, @types/node ^25.3.0, @biomejs/biome ^2.4.8, vitest ^4.1.1
+- `prepublishOnly` now runs lint and typecheck before build
+- Applied `npm audit fix` for transitive dependency vulnerabilities
 
 ## [0.2.1] - 2026-02-11
 

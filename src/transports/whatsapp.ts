@@ -1,9 +1,9 @@
-import type { ITransportProvider } from "./interface.js";
-import type { ExternalMessage } from "../types.js";
-import type { ChallengeAuth } from "../auth/challenge-auth.js";
-import * as qrcode from "qrcode-terminal";
 import * as fs from "fs";
 import * as path from "path";
+import * as qrcode from "qrcode-terminal";
+import type { ChallengeAuth } from "../auth/challenge-auth.js";
+import type { ExternalMessage } from "../types.js";
+import type { ITransportProvider } from "./interface.js";
 
 // Dynamic import for ESM modules
 type WASocket = any;
@@ -142,6 +142,10 @@ export class WhatsAppProvider implements ITransportProvider {
         }
 
         this._isConnected = false;
+
+        if (this.errorHandler && statusCode !== baileys.DisconnectReason.loggedOut) {
+          this.errorHandler(new Error(`connection closed (status ${statusCode})`));
+        }
 
         // If unauthorized (401), clear invalid auth
         if (statusCode === 401) {

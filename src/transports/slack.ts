@@ -1,6 +1,6 @@
-import type { ITransportProvider } from "./interface.js";
-import type { ExternalMessage } from "../types.js";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
+import type { ExternalMessage } from "../types.js";
+import type { ITransportProvider } from "./interface.js";
 
 // Dynamic import for ESM modules
 type App = any;
@@ -193,10 +193,8 @@ export class SlackProvider implements ITransportProvider {
     try {
       await this.app.start();
       this._isConnected = true;
-      console.log("✅ Slack connected via Socket Mode!");
     } catch (error) {
-      console.error("[Slack] Failed to start:", error);
-      throw error;
+      throw new Error(`Slack connection failed: ${(error as Error).message}`);
     }
   }
 
@@ -226,12 +224,11 @@ export class SlackProvider implements ITransportProvider {
         text: text,
       });
     } catch (error) {
-      console.error("[Slack] Failed to send message:", error);
-      throw error;
+      throw new Error(`Slack send failed: ${(error as Error).message}`);
     }
   }
 
-  async sendTyping(chatId: string): Promise<void> {
+  async sendTyping(_chatId: string): Promise<void> {
     // Slack doesn't support typing indicators for bots
     // We could potentially add a reaction or use a "thinking" message
     // but for now we'll just skip it
