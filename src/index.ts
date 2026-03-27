@@ -18,9 +18,25 @@ import * as os from "os";
  */
 export default function (pi: ExtensionAPI): void {
   const transportManager = new TransportManager();
-  let pendingRemoteChat: PendingRemoteChat | null = null;
+  const remoteTurnQueue: PendingRemoteChat[] = [];
+  let activeRemoteChat: PendingRemoteChat | null = null;
+  const consumedRequestIds = new Set<string>();
   let auth: ChallengeAuth;
   let ctx: ExtensionContext;
+
+  const lockRootDir = path.join(os.homedir(), ".pi", "locks");
+  const discordLockDir = path.join(lockRootDir, "msg-bridge-discord.lock");
+  const discordLockOwnerFile = path.join(discordLockDir, "owner.json");
+  let hasDiscordIntakeLock = false;
+  let discordLockReason = "not-requested";
+
+  function getBridgeConfigPath(): string {
+    const piConfigDir = process.env.PI_CODING_AGENT_DIR;
+    if (piConfigDir && piConfigDir.trim()) {
+      return path.join(piConfigDir, "msg-bridge.json");
+    }
+    return path.join(os.homedir(), ".pi", "msg-bridge.json");
+  }
 
   /**
    * Load config from file or env vars
@@ -29,11 +45,7 @@ export default function (pi: ExtensionAPI): void {
     const config: MsgBridgeConfig = {};
 
     // Load config file first
-    const configPath = path.join(
-      os.homedir(),
-      ".pi",
-      "msg-bridge.json"
-    );
+    const configPath = getBridgeConfigPath();
     if (fs.existsSync(configPath)) {
       try {
         // Check file permissions (warn if world-readable)
@@ -74,11 +86,11 @@ export default function (pi: ExtensionAPI): void {
    * Save config to file
    */
   function saveConfig(config: MsgBridgeConfig): void {
-    const configDir = path.join(os.homedir(), ".pi");
+    const configPath = getBridgeConfigPath();
+    const configDir = path.dirname(configPath);
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     }
-    const configPath = path.join(configDir, "msg-bridge.json");
     // Write with secure permissions (owner read/write only)
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
     // Ensure directory permissions are also secure
@@ -87,6 +99,103 @@ export default function (pi: ExtensionAPI): void {
     } catch (err) {
       console.warn("Failed to set directory permissions:", err);
     }
+  }
+
+  function isProcessAlive(pid: number): boolean {
+    if (!Number.isFinite(pid) || pid <= 0) {
+      return false;
+    }
+
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err: any) {
+      return err?.code === "EPERM";
+    }
+  }
+
+  function releaseDiscordIntakeLock(): void {
+    if (!hasDiscordIntakeLock) {
+      return;
+    }
+
+    try {
+      fs.rmSync(discordLockDir, { recursive: true, force: true });
+    } catch (err) {
+      console.warn("Failed to release Discord intake lock:", err);
+    }
+
+    hasDiscordIntakeLock = false;
+    discordLockReason = "released";
+  }
+
+  function acquireDiscordIntakeLock(): { acquired: boolean; reason: string } {
+    if (hasDiscordIntakeLock) {
+      return { acquired: true, reason: "already-held" };
+    }
+
+    fs.mkdirSync(lockRootDir, { recursive: true, mode: 0o700 });
+
+    const attemptAcquire = (): { acquired: boolean; reason: string } => {
+      try {
+        fs.mkdirSync(discordLockDir, { mode: 0o700 });
+        const owner = {
+          pid: process.pid,
+          startedAt: Date.now(),
+          hostname: os.hostname(),
+        };
+        fs.writeFileSync(discordLockOwnerFile, JSON.stringify(owner, null, 2), {
+          mode: 0o600,
+        });
+        hasDiscordIntakeLock = true;
+        discordLockReason = "acquired";
+        return { acquired: true, reason: "acquired" };
+      } catch (err: any) {
+        if (err?.code !== "EEXIST") {
+          return { acquired: false, reason: `lock-error:${err?.message ?? String(err)}` };
+        }
+
+        try {
+          const ownerRaw = fs.readFileSync(discordLockOwnerFile, "utf8");
+          const owner = JSON.parse(ownerRaw) as { pid?: number };
+          const stale = !owner?.pid || !isProcessAlive(owner.pid);
+          if (stale) {
+            fs.rmSync(discordLockDir, { recursive: true, force: true });
+            return attemptAcquire();
+          }
+          return { acquired: false, reason: `lock-held-by-pid:${owner.pid}` };
+        } catch {
+          return { acquired: false, reason: "lock-held" };
+        }
+      }
+    };
+
+    return attemptAcquire();
+  }
+
+  function ensureDiscordTransportRegistered(config: MsgBridgeConfig): boolean {
+    if (!config.discord?.token) {
+      return false;
+    }
+
+    if (transportManager.getTransport("discord")) {
+      return true;
+    }
+
+    const lockResult = acquireDiscordIntakeLock();
+    if (!lockResult.acquired) {
+      hasDiscordIntakeLock = false;
+      discordLockReason = lockResult.reason;
+      ctx.ui.notify(
+        `Discord intake passive on this instance (${lockResult.reason}).`,
+        "warning"
+      );
+      return false;
+    }
+
+    const discordProvider = new DiscordProvider(config.discord, auth);
+    transportManager.addTransport(discordProvider);
+    return true;
   }
 
   /**
@@ -135,6 +244,11 @@ export default function (pi: ExtensionAPI): void {
     if (!str) return "";
     if (str.length <= maxLen) return str;
     return str.substring(0, maxLen - 3) + "...";
+  }
+
+  function isRemoteControlCommand(content: string): boolean {
+    const trimmed = content.trim();
+    return /^!(approve\s+\S+|deny(?:\s+\S+)?)$/i.test(trimmed);
   }
 
   /**
@@ -255,9 +369,9 @@ export default function (pi: ExtensionAPI): void {
 
       // Only auto-add WhatsApp if it has existing session (already authenticated)
       if (config.whatsapp) {
+        const bridgeConfigBase = path.dirname(getBridgeConfigPath());
         const whatsappAuthPath = config.whatsapp.authPath || path.join(
-          os.homedir(),
-          ".pi",
+          bridgeConfigBase,
           "msg-bridge-whatsapp-auth"
         );
         
@@ -294,12 +408,11 @@ export default function (pi: ExtensionAPI): void {
         );
       }
 
-      // Auto-add Discord if configured
+      // Auto-add Discord if configured (singleton lock enforced)
       if (config.discord?.token) {
         transportPromises.push(
           Promise.resolve().then(() => {
-            const discordProvider = new DiscordProvider(config.discord!, auth);
-            transportManager.addTransport(discordProvider);
+            ensureDiscordTransportRegistered(config);
           })
         );
       }
@@ -324,22 +437,143 @@ export default function (pi: ExtensionAPI): void {
 
     // Handle incoming messages from transports
     transportManager.onMessage((msg) => {
-      // Set pending chat context
-      pendingRemoteChat = {
-        chatId: msg.chatId,
-        transport: msg.transport,
-        username: msg.username,
-        messageId: msg.messageId,
-      };
+      const requestId = `${msg.transport}:${msg.messageId}`;
+      const isControl = isRemoteControlCommand(msg.content);
 
-      // Inject message into pi as a user message (triggers agent turn)
-      const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
-      pi.sendUserMessage(taggedMessage);
+      pi.events.emit("msg-bridge:incoming", {
+        ...msg,
+        requestId,
+        queueDepth: remoteTurnQueue.length + (isControl ? 0 : 1),
+        isControl,
+      });
+
+      if (isControl) {
+        return;
+      }
+
+      // Defer queue/enqueue one tick so programmatic handlers can consume
+      // the request without triggering an LLM turn.
+      setTimeout(() => {
+        if (consumedRequestIds.has(requestId)) {
+          consumedRequestIds.delete(requestId);
+          return;
+        }
+
+        remoteTurnQueue.push({
+          chatId: msg.chatId,
+          transport: msg.transport,
+          username: msg.username,
+          messageId: msg.messageId,
+          requestId,
+          queuedAt: Date.now(),
+        });
+
+        // Inject message into pi as a user message (triggers agent turn)
+        const taggedMessage = `[📱 @${msg.username} via ${msg.transport} req:${requestId}]: ${msg.content}`;
+        pi.sendUserMessage(taggedMessage);
+      }, 0);
     });
 
     // Handle transport errors
     transportManager.onError((err, transport) => {
       ctx.ui.notify(`❌ ${transport} error: ${err.message}`, "error");
+    });
+
+    pi.events.on("msg-bridge:consume-request", (data) => {
+      const payload = data as { requestId?: string };
+      if (!payload.requestId) return;
+      consumedRequestIds.add(payload.requestId);
+    });
+
+    pi.events.on("msg-bridge:enqueue-request", (data) => {
+      const payload = data as {
+        transport?: string;
+        chatId?: string;
+        username?: string;
+        messageId?: string;
+        requestId?: string;
+        queuedAt?: number;
+        synthetic?: boolean;
+      };
+
+      if (!payload.transport || !payload.chatId || !payload.requestId) {
+        return;
+      }
+
+      remoteTurnQueue.push({
+        chatId: payload.chatId,
+        transport: payload.transport,
+        username: payload.username ?? "remote-user",
+        messageId: payload.messageId ?? payload.requestId,
+        requestId: payload.requestId,
+        queuedAt: payload.queuedAt ?? Date.now(),
+        synthetic: payload.synthetic ?? true,
+      });
+    });
+
+    pi.events.on("msg-bridge:discord-create-channel", async (data) => {
+      const payload = data as {
+        guildId?: string;
+        name?: string;
+        categoryId?: string;
+        correlationId?: string;
+      };
+      const correlationId = payload.correlationId;
+      try {
+        if (!payload.guildId || !payload.name) {
+          throw new Error("guildId and name are required");
+        }
+        const transport = transportManager.getTransport("discord") as any;
+        if (!transport || typeof transport.createTextChannel !== "function") {
+          throw new Error("Discord transport does not support channel creation");
+        }
+        const created = await transport.createTextChannel(payload.guildId, payload.name, payload.categoryId);
+        pi.events.emit("msg-bridge:discord-create-channel-result", {
+          ok: true,
+          correlationId,
+          channelId: created.id,
+          channelName: created.name,
+          guildId: payload.guildId,
+        });
+      } catch (err: any) {
+        pi.events.emit("msg-bridge:discord-create-channel-result", {
+          ok: false,
+          correlationId,
+          error: err?.message ?? String(err),
+          guildId: payload.guildId,
+        });
+      }
+    });
+
+    pi.events.on("msg-bridge:send", async (data) => {
+      const payload = data as {
+        transport?: string;
+        chatId?: string;
+        text?: string;
+        correlationId?: string;
+      };
+
+      if (!payload.transport || !payload.chatId || !payload.text) {
+        return;
+      }
+
+      try {
+        await transportManager.sendMessage(payload.chatId, payload.transport, payload.text);
+        pi.events.emit("msg-bridge:sent", {
+          ok: true,
+          correlationId: payload.correlationId,
+          transport: payload.transport,
+          chatId: payload.chatId,
+        });
+      } catch (err: any) {
+        pi.events.emit("msg-bridge:sent", {
+          ok: false,
+          correlationId: payload.correlationId,
+          transport: payload.transport,
+          chatId: payload.chatId,
+          error: err?.message ?? String(err),
+        });
+      }
     });
 
     updateWidget();
@@ -348,14 +582,26 @@ export default function (pi: ExtensionAPI): void {
   /**
    * Handle turn start - send typing indicator
    */
-  pi.on("turn_start", async (event, context) => {
-    if (pendingRemoteChat) {
+  pi.on("turn_start", async () => {
+    if (!activeRemoteChat && remoteTurnQueue.length > 0) {
+      activeRemoteChat = remoteTurnQueue.shift() ?? null;
+    }
+
+    if (activeRemoteChat) {
+      pi.events.emit("msg-bridge:active-request", {
+        state: "start",
+        requestId: activeRemoteChat.requestId,
+        chatId: activeRemoteChat.chatId,
+        transport: activeRemoteChat.transport,
+        messageId: activeRemoteChat.messageId,
+      });
+
       try {
         await transportManager.sendTyping(
-          pendingRemoteChat.chatId,
-          pendingRemoteChat.transport
+          activeRemoteChat.chatId,
+          activeRemoteChat.transport
         );
-      } catch (err) {
+      } catch {
         // Ignore typing indicator errors
       }
     }
@@ -364,8 +610,8 @@ export default function (pi: ExtensionAPI): void {
   /**
    * Handle turn end - send response back to messenger
    */
-  pi.on("turn_end", async (event, context) => {
-    if (!pendingRemoteChat) return;
+  pi.on("turn_end", async (event) => {
+    if (!activeRemoteChat) return;
 
     try {
       const message = event.message as AssistantMessage;
@@ -378,6 +624,11 @@ export default function (pi: ExtensionAPI): void {
       if (responseText) parts.push(responseText);
       if (toolCallsText) parts.push(toolCallsText);
 
+      const errorMessage = (message as any).errorMessage as string | undefined;
+      if (parts.length === 0 && errorMessage) {
+        parts.push(`❌ Model/provider error\n\n${errorMessage}`);
+      }
+
       // Nothing to send at all — skip
       if (parts.length === 0) return;
 
@@ -387,24 +638,53 @@ export default function (pi: ExtensionAPI): void {
       const chunks = splitMessage(fullText, 4000);
       for (const chunk of chunks) {
         await transportManager.sendMessage(
-          pendingRemoteChat.chatId,
-          pendingRemoteChat.transport,
+          activeRemoteChat.chatId,
+          activeRemoteChat.transport,
           chunk
         );
       }
 
-      // Only clear pending chat on final turn (no more tool calls pending)
+      pi.events.emit("msg-bridge:outgoing", {
+        requestId: activeRemoteChat.requestId,
+        transport: activeRemoteChat.transport,
+        chatId: activeRemoteChat.chatId,
+        hasPendingTools,
+        queuedAt: activeRemoteChat.queuedAt,
+      });
+
+      // Only clear active chat on final turn (no more tool calls pending)
       if (!hasPendingTools) {
-        pendingRemoteChat = null;
+        pi.events.emit("msg-bridge:active-request", {
+          state: "end",
+          requestId: activeRemoteChat.requestId,
+          chatId: activeRemoteChat.chatId,
+          transport: activeRemoteChat.transport,
+          messageId: activeRemoteChat.messageId,
+        });
+        activeRemoteChat = null;
       }
     } catch (err) {
-      const transport = pendingRemoteChat?.transport ?? "unknown";
+      const transport = activeRemoteChat?.transport ?? "unknown";
       ctx.ui.notify(
         `Failed to send response to ${transport}: ${(err as Error).message}`,
         "error"
       );
-      pendingRemoteChat = null;
+      if (activeRemoteChat) {
+        pi.events.emit("msg-bridge:active-request", {
+          state: "end",
+          requestId: activeRemoteChat.requestId,
+          chatId: activeRemoteChat.chatId,
+          transport: activeRemoteChat.transport,
+          messageId: activeRemoteChat.messageId,
+        });
+      }
+      activeRemoteChat = null;
     }
+  });
+
+  pi.on("session_shutdown", async () => {
+    await transportManager.disconnectAll();
+    releaseDiscordIntakeLock();
   });
 
   /**
@@ -438,9 +718,10 @@ export default function (pi: ExtensionAPI): void {
         break;
       case "connect":
         try {
+          const cfg = loadConfig();
+          ensureDiscordTransportRegistered(cfg);
           await transportManager.connectAll();
           // Save autoConnect preference
-          const cfg = loadConfig();
           cfg.autoConnect = true;
           saveConfig(cfg);
           context.ui.notify("✅ Connected to all configured transports", "info");
@@ -551,10 +832,22 @@ export default function (pi: ExtensionAPI): void {
             
             config.discord = { token };
             saveConfig(config);
-            const discordProvider = new DiscordProvider(config.discord, auth);
-            transportManager.addTransport(discordProvider);
+
+            const registered = ensureDiscordTransportRegistered(config);
+            if (!registered) {
+              context.ui.notify(
+                `⚠️ Discord configured, but this process is passive (${discordLockReason}).`,
+                "warning"
+              );
+              updateWidget();
+              break;
+            }
+
+            const discordTransport = transportManager.getTransport("discord");
             try {
-              await discordProvider.connect();
+              if (discordTransport && !discordTransport.isConnected) {
+                await discordTransport.connect();
+              }
               context.ui.notify("✅ Discord configured and connected", "info");
             } catch (err) {
               context.ui.notify(`⚠️ Discord setup error: ${(err as Error).message}`, "error");
@@ -582,6 +875,9 @@ export default function (pi: ExtensionAPI): void {
         const status = transportManager.getStatus();
         const lines = [
           "━━━ Message Bridge Status ━━━",
+          "",
+          `Discord intake lock: ${hasDiscordIntakeLock ? "owned" : `passive (${discordLockReason})`}`,
+          `Remote queue depth: ${remoteTurnQueue.length}${activeRemoteChat ? " (+1 active)" : ""}`,
           "",
           "Transports:",
           ...status.map(

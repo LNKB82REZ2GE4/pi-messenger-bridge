@@ -20,6 +20,12 @@ export interface ExternalMessage {
   isGroupChat: boolean;
   /** Was the bot mentioned? (for group chats) */
   wasMentioned?: boolean;
+  /** Reply target message id if the user replied to a message */
+  replyToMessageId?: string;
+  /** Discord guild id (when available) */
+  guildId?: string;
+  /** Discord channel name (when available) */
+  channelName?: string;
 }
 
 /**
@@ -57,6 +63,9 @@ export interface PendingRemoteChat {
   transport: string;
   username: string;
   messageId: string;
+  requestId: string;
+  queuedAt: number;
+  synthetic?: boolean;
 }
 
 /**

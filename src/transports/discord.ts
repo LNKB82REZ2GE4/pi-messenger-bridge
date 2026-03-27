@@ -21,7 +21,9 @@ export class DiscordProvider implements ITransportProvider {
   private botUserId: string = "";
   private messageHandler?: (message: ExternalMessage) => void;
   private errorHandler?: (error: Error) => void;
-  private lastProcessedMessageId = "";
+  private readonly processedMessageIds = new Set<string>();
+  private readonly processedMessageOrder: string[] = [];
+  private readonly maxProcessedMessageIds = 2000;
 
   constructor(
     private config: { token: string },
@@ -66,11 +68,11 @@ export class DiscordProvider implements ITransportProvider {
         return;
       }
 
-      // Filter out duplicate messages
-      if (message.id === this.lastProcessedMessageId) {
+      // Filter out duplicate/replayed messages
+      if (this.hasProcessedMessage(message.id)) {
         return;
       }
-      this.lastProcessedMessageId = message.id;
+      this.rememberMessage(message.id);
 
       // Detect if this is a DM
       const isDM = message.channel.type === discord.ChannelType.DM;
@@ -138,6 +140,9 @@ export class DiscordProvider implements ITransportProvider {
           messageId: message.id,
           isGroupChat,
           wasMentioned,
+          replyToMessageId: message.reference?.messageId,
+          guildId: message.guildId,
+          channelName: message.channel?.name,
         };
 
         this.messageHandler(externalMessage);
@@ -221,12 +226,53 @@ export class DiscordProvider implements ITransportProvider {
     }
   }
 
+  async createTextChannel(guildId: string, name: string, categoryId?: string): Promise<{ id: string; name: string }> {
+    if (!this.client) {
+      throw new Error("Discord not connected");
+    }
+
+    const discord = await loadDiscordJS();
+    const guild = await this.client.guilds.fetch(guildId);
+    if (!guild) {
+      throw new Error(`Guild not found: ${guildId}`);
+    }
+
+    const channel = await guild.channels.create({
+      name,
+      type: discord.ChannelType.GuildText,
+      parent: categoryId,
+      reason: "LNKCLAW orchestrator setup command",
+    } as any);
+
+    return { id: channel.id, name: channel.name };
+  }
+
   onMessage(handler: (message: ExternalMessage) => void): void {
     this.messageHandler = handler;
   }
 
   onError(handler: (error: Error) => void): void {
     this.errorHandler = handler;
+  }
+
+  private hasProcessedMessage(messageId: string): boolean {
+    return this.processedMessageIds.has(messageId);
+  }
+
+  private rememberMessage(messageId: string): void {
+    if (this.processedMessageIds.has(messageId)) {
+      return;
+    }
+
+    this.processedMessageIds.add(messageId);
+    this.processedMessageOrder.push(messageId);
+
+    if (this.processedMessageOrder.length > this.maxProcessedMessageIds) {
+      const removed = this.processedMessageOrder.shift();
+      if (removed) {
+        this.processedMessageIds.delete(removed);
+      }
+    }
   }
 
   /**
